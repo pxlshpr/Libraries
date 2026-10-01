@@ -73,6 +73,54 @@ final class OrbMetalParityTests: XCTestCase {
         print("Metal against the Canvas over \(frames) frames: the worst channel is \(worst) of 255 apart")
     }
 
+    /// The greys of the dark appearance, and one colour in place of the greys. The dark greys
+    /// agree as the light ones do. A colour is looser: 7 at the worst, on fewer than one pixel
+    /// in ten thousand.
+    @MainActor
+    func testMetalDrawsTheOtherInksTheCanvasDraws() throws {
+        guard OrbMetalRenderer.shared.isAvailable else { throw XCTSkip("no Metal device") }
+        let inks: [(String, OrbTheme, Color?, OrbInk, Int)] = [
+            ("dark", .dark, nil, .greys(isDark: true), Self.tolerance),
+            ("tint", .light, Color(.sRGB, red: 0.42, green: 0.36, blue: 0.91, opacity: 1),
+             .tint(SIMD4(0.42, 0.36, 0.91, 1)), 8),
+            ("faint tint", .light, Color(.sRGB, red: 0.95, green: 0.55, blue: 0.2, opacity: 0.6),
+             .tint(SIMD4(0.95, 0.55, 0.2, 0.6)), 8),
+        ]
+        for (inkName, theme, tint, ink, limit) in inks {
+            var worst = 0
+            var over2 = 0
+            var total = 0
+            for state in OrbState.allCases {
+                for (size, side) in Self.sizes {
+                    let scale: CGFloat = 3
+                    let time = 2.5
+                    let pixels = Int((side * scale).rounded())
+                    let name = "\(inkName) \(state.rawValue)-\(size.rawValue)@\(Int(side))pt"
+                    let metal = try XCTUnwrap(
+                        OrbMetalRenderer.shared.renderBitmap(state: state, size: size, time: time, pixels: pixels, ink: ink),
+                        "Metal render failed: \(name)")
+                    let canvas = try XCTUnwrap(
+                        Self.canvas(state: state, size: size, side: side, scale: scale, time: time, theme: theme, tint: tint),
+                        "Canvas render failed: \(name)")
+                    var difference = 0
+                    for pixel in 0..<(pixels * pixels) {
+                        var here = 0
+                        for channel in 0..<4 {
+                            here = max(here, abs(Int(metal[pixel * 4 + channel]) - Int(canvas[pixel * 4 + channel])))
+                        }
+                        difference = max(difference, here)
+                        if here > 2 { over2 += 1 }
+                    }
+                    total += pixels * pixels
+                    worst = max(worst, difference)
+                    XCTAssertLessThanOrEqual(difference, limit, "\(name): a channel is \(difference) of 255 apart")
+                }
+            }
+            print(String(format: "Metal against the Canvas in the %@ ink: the worst channel is %d of 255 apart, %.4f%% of pixels more than 2",
+                         inkName, worst, 100 * Double(over2) / Double(max(total, 1))))
+        }
+    }
+
     /// The tinted inks draw through the same pipeline; this pins their arithmetic.
     func testInkColours() {
         let grey = OrbInk.greys(isDark: false).color(white: 0.5, alpha: 0.5)
@@ -93,9 +141,11 @@ final class OrbMetalParityTests: XCTestCase {
 
     /// The Canvas's frame as premultiplied BGRA bytes, top row first: the Metal read-back's layout.
     @MainActor
-    private static func canvas(state: OrbState, size: OrbSize, side: Double, scale: CGFloat, time: Double) -> [UInt8]? {
+    private static func canvas(state: OrbState, size: OrbSize, side: Double, scale: CGFloat, time: Double,
+                               theme: OrbTheme = .light, tint: Color? = nil) -> [UInt8]? {
         let pixels = Int((side * scale).rounded())
-        let content = ThinkingOrb(state: state, size: size, theme: .light, displaySize: side).orbFrozenTime(time)
+        let content = ThinkingOrb(state: state, size: size, theme: theme, displaySize: side, tint: tint)
+            .orbFrozenTime(time)
         let renderer = ImageRenderer(content: content)
         renderer.scale = scale
         renderer.isOpaque = false

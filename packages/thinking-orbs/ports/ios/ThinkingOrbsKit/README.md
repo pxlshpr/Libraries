@@ -71,7 +71,17 @@ ThinkingOrb(state: .listening).orbRenderer(.canvas)   // e.g. an orb used as a m
 Call `OrbMetalRenderer.shared.prewarm()` at launch to compile the shaders
 (from source, so the kit carries no `.metal` resource) before the first orb
 appears. `OrbMetalRenderer.shared.maximumFramesPerSecond` caps the orbs'
-frame rate; nil is the display's own, as the Canvas runs.
+frame rate; nil is the display's own, as the Canvas runs. If the shaders do
+not compile, `isAvailable` turns false, every later orb is drawn by the
+Canvas, and a SwiftUI `ThinkingOrb` already on screen falls back to it on
+`OrbMetalRenderer.didFailNotification`.
+
+An orb's display link is its scene's where the system offers one (iOS 27,
+`UIWindowScene.displayLink(target:selector:)`), so it follows the scene from
+one display to another (a foldable's cover and inner displays); before that
+it is the main display's. The orb rests while its scene is in the
+background or it is in no window, and its render thread is replaced if it
+ends by itself.
 
 ### Pixel parity with the Canvas
 
@@ -88,8 +98,11 @@ swift test --filter OrbMetalParityTests
 draws all nine states at six sizes, five instants and two screen scales with
 both and compares them byte for byte: over those 540 frames the worst
 channel of the worst pixel is **2 of 255** apart, on a Mac's GPU and on an
-iPhone's alike. (Core Graphics drawing the same commands is 20 to 116 apart
-from the Canvas on edge pixels.)
+iPhone's alike, and the dark appearance's greys agree as closely. (Core
+Graphics drawing the same commands is 20 to 116 apart from the Canvas on
+edge pixels.) In one colour (`ThinkingOrb(tint:)`) the two are looser: 7 at
+the worst, on fewer than one pixel in a hundred thousand, where many faint
+marks overlap and each renderer rounds them its own way.
 
 ## Verification
 

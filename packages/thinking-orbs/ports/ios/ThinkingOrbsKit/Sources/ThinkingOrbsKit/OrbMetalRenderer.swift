@@ -153,6 +153,10 @@ public final class OrbMetalRenderer: @unchecked Sendable {
             stateLock.lock()
             pipelineFailed = true
             stateLock.unlock()
+            // Orbs already on screen chose Metal before this was known: tell them.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.didFailNotification, object: nil)
+            }
             assertionFailure("ThinkingOrbs: the Metal pipeline did not build: \(error)")
             return nil
         }
@@ -165,6 +169,11 @@ public final class OrbMetalRenderer: @unchecked Sendable {
     }
 
     private enum OrbMetalError: Error { case noCommandQueue }
+
+    /// Posted on the main thread when the pipeline turns out not to build: `isAvailable` is
+    /// false from then on, and a SwiftUI `ThinkingOrb` already drawn by Metal falls back to
+    /// its Canvas on hearing it.
+    public static let didFailNotification = Notification.Name("ThinkingOrbs.metalRendererDidFail")
 
     /// 8-bit and not sRGB-decoding, so marks blend in encoded space as the Canvas's
     /// `.nonLinear` colour mode does.

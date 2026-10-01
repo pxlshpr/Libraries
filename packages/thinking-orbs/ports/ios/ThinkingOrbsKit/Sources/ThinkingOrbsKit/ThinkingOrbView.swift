@@ -123,6 +123,8 @@ public final class ThinkingOrbView: UIView {
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
+        // Before `apply()`: the loop makes its display link for the scene it is on.
+        loop.setScene(window?.windowScene)
         sizeDrawable()
         apply()
     }

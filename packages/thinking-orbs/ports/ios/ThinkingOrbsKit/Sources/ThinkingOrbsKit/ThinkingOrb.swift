@@ -50,6 +50,10 @@ public struct ThinkingOrb: View {
     // ImageRenderer never advances a TimelineView, so snapshot.sh injects a
     // fixed instant here to capture a deterministic frame.
     @Environment(\.orbFrozenTime) private var frozenTime
+    /// Moved when the Metal renderer turns out not to work in this process (its shaders are
+    /// compiled after the first orbs are on screen): the body is read again and falls back to
+    /// the Canvas, where an orb already drawn by Metal would otherwise stay blank.
+    @State private var rendererOutcome = 0
 
     /// `displaySize` renders the orb at an arbitrary point size while keeping
     /// the tuned `size` preset's geometry — the drawing is scaled inside the
@@ -104,6 +108,11 @@ public struct ThinkingOrb: View {
         .accessibilityElement()
         .accessibilityLabel(state.label)
         .accessibilityAddTraits(.isImage)
+        #if canImport(UIKit) && canImport(Metal)
+        .onReceive(NotificationCenter.default.publisher(for: OrbMetalRenderer.didFailNotification)) { _ in
+            rendererOutcome &+= 1
+        }
+        #endif
     }
 
     /// The renderer asked for: the one set for this part of the view tree, else the stored pick.
@@ -114,6 +123,8 @@ public struct ThinkingOrb: View {
     @ViewBuilder
     private func animated(preset: ResolvedPreset, effSpeed: Double) -> some View {
         #if canImport(UIKit) && canImport(Metal)
+        // Read so that a failure, when it is announced, has this body read again.
+        let _ = rendererOutcome
         if renderer == .metal, OrbMetalRenderer.shared.isAvailable {
             // The same wall clock as the Canvas below, read on the render thread: orbs drawn
             // either way stay in phase.
