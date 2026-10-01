@@ -4,8 +4,10 @@ Dotted thought-orb loading indicators for SwiftUI. Port of
 [thinking-orbs](https://orbs.jakubantalik.com) — nine hand-tuned animated
 states, two purpose-tuned sizes, automatic dark/light.
 
-iOS 15+ / macOS 12+. No dependencies, no Metal — `TimelineView(.animation)`
-drives the clock and `Canvas` does the drawing.
+iOS 15+ / macOS 12+. No dependencies. Two renderers draw the same engine's
+frames: **Metal**, off the main thread (the default on iOS), and the SwiftUI
+**Canvas** on a `TimelineView` (the reference, and what draws every still
+frame). See [Renderers](#renderers).
 
 ## Usage
 
@@ -17,11 +19,77 @@ ThinkingOrb(state: .breathing, size: .px20, theme: .light, speed: 1.5)
 ```
 
 `state`, `size` (`.px64 | .px20`), `theme` (`.auto | .dark | .light`,
-where `.auto` reads `\.colorScheme`), `speed`, `paused`.
+where `.auto` reads `\.colorScheme`), `speed`, `paused`, `displaySize` (the
+orb at any point size, on the preset's geometry), `tint` (one ink colour in
+place of the greys).
+
+From UIKit, `ThinkingOrbView` is the same orb as a view:
+
+```swift
+let orb = ThinkingOrbView(state: .connecting, size: .px20, ink: .greys(isDark: false))
+orb.frame = CGRect(x: 0, y: 0, width: 42, height: 42)
+```
 
 Accessibility: each orb is an image element labelled per state, and
 `\.accessibilityReduceMotion` renders a single static frame — the same
 instant the web build freezes at.
+
+## Renderers
+
+`TimelineView` + `Canvas` builds every frame on the **main thread**: the
+engine's geometry, a display list of up to a few hundred fills, and the
+rasteriser's commit, at the display's rate (120 Hz on ProMotion) for as long
+as an orb is on screen. That is nothing on a still screen and a real share
+of the frame under a scroll, where the same frame also has rows to
+configure and lay out.
+
+The Metal renderer draws the same frame into a `CAMetalLayer` from a render
+thread with its own display link, and presents it outside any transaction,
+so an animating orb costs the main thread nothing.
+
+| | Canvas | Metal |
+|---|---|---|
+| Where a frame is built | main thread | a render thread per orb |
+| Main-thread cost while animating | every frame | none |
+| Still frames (paused, Reduce Motion, `orbFrozenTime`) | yes | drawn by the Canvas |
+| `ImageRenderer`, SwiftUI `mask` | yes | no (a platform view) |
+
+Measured on an iPhone 16 Pro Max at 120 Hz, twelve 42 pt `connecting` orbs
+on screen, as main-thread time per frame: **0.23 ms** with the Canvas,
+**0.03 ms** with Metal, against 0.03 ms with no orb at all. One orb in a
+scrolling list cost that list's frames a third more main thread than they
+cost without it; on Metal it costs them nothing.
+
+Metal is the default where it exists. Pick per process with the
+`OrbRenderer.defaultsKey` user default (`"metal"` / `"canvas"`, read live),
+or per subtree:
+
+```swift
+ThinkingOrb(state: .listening).orbRenderer(.canvas)   // e.g. an orb used as a mask
+```
+
+Call `OrbMetalRenderer.shared.prewarm()` at launch to compile the shaders
+(from source, so the kit carries no `.metal` resource) before the first orb
+appears. `OrbMetalRenderer.shared.maximumFramesPerSecond` caps the orbs'
+frame rate; nil is the display's own, as the Canvas runs.
+
+### Pixel parity with the Canvas
+
+The Metal renderer's anti-aliasing is the Canvas's own, measured off
+SwiftUI's rasteriser one shape at a time: an edge is a ramp one pixel wide
+along its normal, `0.5 − d / fwidth(d)`, smoothstepped for a fill and for a
+stroke wider than 2.5 px, plain for a thinner stroke, and a stroke under a
+pixel wide is drawn a pixel wide and that much fainter.
+
+```bash
+swift test --filter OrbMetalParityTests
+```
+
+draws all nine states at six sizes, five instants and two screen scales with
+both and compares them byte for byte: over those 540 frames the worst
+channel of the worst pixel is **2 of 255** apart, on a Mac's GPU and on an
+iPhone's alike. (Core Graphics drawing the same commands is 20 to 116 apart
+from the Canvas on edge pixels.)
 
 ## Verification
 

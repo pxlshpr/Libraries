@@ -1,15 +1,32 @@
 // The SwiftUI ThinkingOrb.
 //
-// TimelineView(.animation) drives the clock and Canvas does the drawing —
-// no timers, no Metal, no CADisplayLink to tear down. SwiftUI stops
-// servicing a TimelineView that is off-screen, which is the equivalent of
-// the web build's IntersectionObserver pause and comes for free.
+// Two renderers draw the same engine's frames:
+//
+// - **Metal** (`OrbRenderer.metal`, the default where Metal exists): a `CAMetalLayer` drawn
+//   from a render thread of its own (`OrbMetalRenderer`), so an animating orb costs the main
+//   thread nothing. Used only while the orb is animating.
+// - **Canvas** (`OrbRenderer.canvas`): TimelineView(.animation) drives the clock and Canvas
+//   does the drawing, on the main thread, every frame. The reference renderer; also what
+//   draws every STILL frame (paused, Reduce Motion, a frozen instant), since a still costs
+//   nothing per frame and a Canvas is what `ImageRenderer` can draw.
 
 import SwiftUI
 
 /// Theme mode. `.auto` follows the environment's colour scheme.
 public enum OrbTheme: Sendable {
     case auto, dark, light
+}
+
+/// What draws an animating orb.
+public enum OrbRenderer: String, CaseIterable, Sendable {
+    /// Metal, off the main thread. Falls back to the Canvas where Metal is not available.
+    case metal
+    /// The SwiftUI Canvas on a TimelineView, on the main thread: the reference.
+    case canvas
+
+    /// The UserDefaults key holding the process-wide pick, which every orb reads live. Unset
+    /// reads as `.metal`. `orbRenderer(_:)` overrides it for the orbs under one view.
+    public static let defaultsKey = "ThinkingOrbs.renderer"
 }
 
 @available(iOS 15.0, macOS 12.0, *)
@@ -20,9 +37,16 @@ public struct ThinkingOrb: View {
     private let speed: Double
     private let paused: Bool
     private let displaySize: Double?
+    /// An ink colour in place of the greys: each mark is drawn in it at the strength the grey
+    /// would have on paper (the nearest near full, the farthest faint), so the orb reads the
+    /// same on any background, clear glass among them. Nil keeps the tuned greys, which the
+    /// golden vectors and the parity harness compare.
+    private let tint: Color?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.orbRenderer) private var rendererOverride
+    @AppStorage(OrbRenderer.defaultsKey) private var storedRenderer = OrbRenderer.metal.rawValue
     // ImageRenderer never advances a TimelineView, so snapshot.sh injects a
     // fixed instant here to capture a deterministic frame.
     @Environment(\.orbFrozenTime) private var frozenTime
@@ -37,7 +61,8 @@ public struct ThinkingOrb: View {
         theme: OrbTheme = .auto,
         speed: Double = 1,
         paused: Bool = false,
-        displaySize: Double? = nil
+        displaySize: Double? = nil,
+        tint: Color? = nil
     ) {
         self.state = state
         self.size = size
@@ -45,6 +70,7 @@ public struct ThinkingOrb: View {
         self.speed = speed
         self.paused = paused
         self.displaySize = displaySize
+        self.tint = tint
     }
 
     private var isDark: Bool {
@@ -71,18 +97,44 @@ public struct ThinkingOrb: View {
                 // one static, deterministic frame — same instant as the web
                 canvas(preset: preset, t: OrbSpec.reducedMotionT * effSpeed)
             } else {
-                TimelineView(.animation(paused: paused)) { timeline in
-                    // One shared clock, so several orbs on screen stay in
-                    // phase exactly as they do on the web.
-                    let t = timeline.date.timeIntervalSinceReferenceDate * effSpeed
-                    canvas(preset: preset, t: t)
-                }
+                animated(preset: preset, effSpeed: effSpeed)
             }
         }
         .frame(width: side, height: side)
         .accessibilityElement()
         .accessibilityLabel(state.label)
         .accessibilityAddTraits(.isImage)
+    }
+
+    /// The renderer asked for: the one set for this part of the view tree, else the stored pick.
+    private var renderer: OrbRenderer {
+        rendererOverride ?? OrbRenderer(rawValue: storedRenderer) ?? .metal
+    }
+
+    @ViewBuilder
+    private func animated(preset: ResolvedPreset, effSpeed: Double) -> some View {
+        #if canImport(UIKit) && canImport(Metal)
+        if renderer == .metal, OrbMetalRenderer.shared.isAvailable {
+            // The same wall clock as the Canvas below, read on the render thread: orbs drawn
+            // either way stay in phase.
+            ThinkingOrbMetalView(state: state, size: size, speed: speed, isDark: isDark,
+                                 tint: tint, tintIgnoresInk: false)
+                .allowsHitTesting(false)
+        } else {
+            timeline(preset: preset, effSpeed: effSpeed)
+        }
+        #else
+        timeline(preset: preset, effSpeed: effSpeed)
+        #endif
+    }
+
+    private func timeline(preset: ResolvedPreset, effSpeed: Double) -> some View {
+        TimelineView(.animation(paused: paused)) { timeline in
+            // One shared clock, so several orbs on screen stay in
+            // phase exactly as they do on the web.
+            let t = timeline.date.timeIntervalSinceReferenceDate * effSpeed
+            canvas(preset: preset, t: t)
+        }
     }
 
     @ViewBuilder
@@ -115,8 +167,33 @@ public struct ThinkingOrb: View {
     /// land on identical greys rather than merely close ones.
     private func ink(_ white: Double, _ alpha: Double) -> Color {
         let w = Swift.min(1, Swift.max(0, white))
+        if let tint { return tint.opacity(alpha * (1 - w)) }
         let g = ((isDark ? 1 - w : w) * 255).rounded(.toNearestOrAwayFromZero) / 255
         return Color(.sRGB, red: g, green: g, blue: g, opacity: alpha)
+    }
+}
+
+// MARK: - Renderer
+
+private struct OrbRendererKey: EnvironmentKey {
+    static let defaultValue: OrbRenderer? = nil
+}
+
+extension EnvironmentValues {
+    /// The renderer for the orbs below, over the stored pick (`OrbRenderer.defaultsKey`). An
+    /// orb used as a SwiftUI `mask` needs `.canvas`: a mask is rasterised by SwiftUI, which
+    /// cannot draw a platform view into one.
+    public var orbRenderer: OrbRenderer? {
+        get { self[OrbRendererKey.self] }
+        set { self[OrbRendererKey.self] = newValue }
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+extension View {
+    /// Draw every ThinkingOrb below this view with `renderer`.
+    public func orbRenderer(_ renderer: OrbRenderer?) -> some View {
+        environment(\.orbRenderer, renderer)
     }
 }
 
@@ -130,7 +207,7 @@ extension EnvironmentValues {
     /// Pins the animation to a fixed instant. Used by the snapshot harness;
     /// `ImageRenderer` does not fire `onAppear` or advance `TimelineView`,
     /// so without this every capture would render the same t=0 frame.
-    var orbFrozenTime: Double? {
+    public var orbFrozenTime: Double? {
         get { self[OrbFrozenTimeKey.self] }
         set { self[OrbFrozenTimeKey.self] = newValue }
     }

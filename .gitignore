@@ -59,3 +59,7 @@ sites/home/scripts/posters/extract
 # pages); the local build picks it up when present.
 private/
 sites/home/vite.local.mjs
+
+# Swift Package Manager (the root manifest, for adding ThinkingOrbsKit by this repo's URL)
+/.build/
+/.swiftpm/
