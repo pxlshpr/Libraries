@@ -116,24 +116,31 @@ final class OrbRenderLoop: NSObject, @unchecked Sendable {
         if hadThread { retireThread() }
     }
 
-    /// Ends the thread there is, if any, without waiting for it: its link goes, its run loop
-    /// is told to stop, and its number is no longer the loop's. May be called from any thread.
+    /// Ends the thread there is, if any, without waiting for it: its number is no longer the
+    /// loop's, and its run loop is handed a block that stops it. May be called from any thread.
+    ///
+    /// The thread's link and run loop are taken down by that thread alone (#3468). This used to
+    /// invalidate the link and stop the run loop from here, while the thread, back from a tick
+    /// and seeing its number gone, invalidated the same link and exited: the link's run loop
+    /// source was let go twice, and the thread died finalizing its run loop. So the run loop is
+    /// only ever reached under `stateLock`, which a thread takes once more before it ends: a
+    /// loop found here is one whose thread has not left it.
     private func retireThread() {
         stateLock.lock()
         generation &+= 1
-        let link = self.link
         let runLoop = self.runLoop
-        self.link = nil
+        link = nil
         self.runLoop = nil
         thread = nil
-        stateLock.unlock()
-        // A loop waiting on its one source does not notice that source going, so it is told
-        // to stop as well.
-        link?.invalidate()
         if let runLoop {
-            CFRunLoopStop(runLoop)
+            // A block, since a stop asked for between two runs of the loop is forgotten by the
+            // next, and a loop waiting on a paused link would then never end. A block waits.
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) {
+                CFRunLoopStop(CFRunLoopGetCurrent())
+            }
             CFRunLoopWakeUp(runLoop)
         }
+        stateLock.unlock()
     }
 
     /// The drawable's size in pixels. Never waits: false while a draw is in flight (a fraction
@@ -216,7 +223,8 @@ final class OrbRenderLoop: NSObject, @unchecked Sendable {
         self.link = link
         runLoop = CFRunLoopGetCurrent()
         stateLock.unlock()
-        // Runs until the link is taken away and the loop stopped (`retireThread`).
+        // Runs until the loop is stopped (`retireThread`) or its number is no longer the
+        // loop's. The link is invalidated below, here on its own thread, and nowhere else.
         while true {
             let ran = autoreleasepool { RunLoop.current.run(mode: .default, before: .distantFuture) }
             stateLock.lock()
@@ -227,7 +235,8 @@ final class OrbRenderLoop: NSObject, @unchecked Sendable {
         link.invalidate()
         // Still the loop's thread, so its run loop ended by itself (the link was its one
         // source). Its place is given up, which is also what lets go of the thread's hold on
-        // this loop, and another is started if there is drawing owed.
+        // this loop, and another is started if there is drawing owed. Taking the lock here is
+        // also what lets `retireThread` finish with this run loop before the thread ends.
         stateLock.lock()
         var owed = false
         if generation == number {
